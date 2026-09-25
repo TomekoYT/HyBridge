@@ -27,6 +27,9 @@ object HypixelPackets {
     var inTheBridge = false
         private set
 
+    var currentMapName: String? = null
+        private set
+
     fun register() {
         HypixelModAPI.getInstance().createHandler(ClientboundHelloPacket::class.java, { onHypixel = true })
         //? if forge {
@@ -65,6 +68,13 @@ object HypixelPackets {
 
         inDuels = serverTypeName == "Duels"
 
+        if (!packet.map.isPresent) {
+            disableMaps()
+        } else {
+            currentMapName = packet.map.orElse(null)
+            Debug.log("mapName: $currentMapName <")
+        }
+
         if (!packet.mode.isPresent) {
             disableModes()
             return
@@ -78,11 +88,16 @@ object HypixelPackets {
 
     private fun disableAll() {
         disableServerTypes()
+        disableMaps()
         disableModes()
     }
 
     private fun disableServerTypes() {
         inDuels = false
+    }
+
+    private fun disableMaps() {
+        currentMapName = null
     }
 
     private fun disableModes() {
