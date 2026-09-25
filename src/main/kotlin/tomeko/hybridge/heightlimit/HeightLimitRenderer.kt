@@ -33,11 +33,9 @@ import kotlin.math.floor
 
 object HeightLimitRenderer {
     private const val RADIUS = 128
+
     private const val CHUNK_SHIFT = 4
-    private const val CHUNK_SIZE = 16
-
     private const val CHUNK_BUILD_BUDGET_PER_TICK = 4
-
     private const val CHUNK_EVICT_BUFFER = 48
 
     private const val FACE_TOP = 0
@@ -51,41 +49,59 @@ object HeightLimitRenderer {
 
     private class ChunkCache(val cx: Int, val cz: Int) {
         var built = false
+        var queued = false
         var faces: IntArray = EMPTY_FACES
-        val blockBits = LongArray(4)
-
-        fun setBlock(lx: Int, lz: Int) {
-            val bit = lz * CHUNK_SIZE + lx
-            blockBits[bit ushr 6] = blockBits[bit ushr 6] or (1L shl (bit and 63))
-        }
-
-        fun clearBlockBits() {
-            blockBits[0] = 0L; blockBits[1] = 0L; blockBits[2] = 0L; blockBits[3] = 0L
-        }
     }
 
     private val chunkMap = HashMap<Long, ChunkCache>()
     private val buildQueue = ArrayDeque<Long>()
+
+    private var revalidateKeys: LongArray = LongArray(0)
     private var revalidateIndex = 0
+    private var revalidateDirty = true
 
     private var cachedMapName: String? = null
     private var cachedTargetY: Int = Int.MIN_VALUE
+
     private var cachedLevel:
     //? if 1.8.9 {
-            //WorldClient? = null
+    //WorldClient? = null
     //?} else {
-    ClientLevel? = null
+            ClientLevel? = null
     //?}
 
     private var lastPlayerChunkX = Int.MIN_VALUE
     private var lastPlayerChunkZ = Int.MIN_VALUE
+
     private var wasActive = false
 
-    private fun chunkKey(cx: Int, cz: Int): Long = (cx.toLong() shl 32) or (cz.toLong() and 0xFFFFFFFFL)
-    private fun pack(lx: Int, lz: Int, face: Int): Int = (face shl 8) or (lx shl 4) or lz
-    private fun unpackLX(v: Int): Int = (v ushr 4) and 0xF
-    private fun unpackLZ(v: Int): Int = v and 0xF
-    private fun unpackFace(v: Int): Int = v ushr 8
+    private fun chunkKey(cx: Int, cz: Int): Long {
+        return (cx.toLong() shl 32) or (cz.toLong() and 0xFFFFFFFFL)
+    }
+
+    private fun packFace(x: Int, z: Int, width: Int, height: Int, face: Int): Int {
+        return x or (z shl 4) or ((width - 1) shl 8) or ((height - 1) shl 12) or (face shl 16)
+    }
+
+    private fun unpackX(v: Int): Int {
+        return v and 0xF
+    }
+
+    private fun unpackZ(v: Int): Int {
+        return (v ushr 4) and 0xF
+    }
+
+    private fun unpackWidth(v: Int): Int {
+        return ((v ushr 8) and 0xF) + 1
+    }
+
+    private fun unpackHeight(v: Int): Int {
+        return ((v ushr 12) and 0xF) + 1
+    }
+
+    private fun unpackFace(v: Int): Int {
+        return (v ushr 16) and 0x7
+    }
 
     fun register() {
         //? if >= 26.2 {
@@ -101,33 +117,58 @@ object HeightLimitRenderer {
         //?}
     }
 
+    private fun clearCache() {
+        chunkMap.clear()
+        buildQueue.clear()
+
+        cachedMapName = null
+        cachedTargetY = Int.MIN_VALUE
+        cachedLevel = null
+
+        lastPlayerChunkX = Int.MIN_VALUE
+        lastPlayerChunkZ = Int.MIN_VALUE
+
+        revalidateKeys = LongArray(0)
+        revalidateIndex = 0
+        revalidateDirty = true
+    }
+
     private fun onClientTick() {
         if (!HyBridgeConfig.heightOverlay || !HypixelPackets.inTheBridge) {
             if (wasActive) {
-                chunkMap.clear()
-                buildQueue.clear()
-                cachedMapName = null
-                cachedTargetY = Int.MIN_VALUE
-                cachedLevel = null
-                lastPlayerChunkX = Int.MIN_VALUE
-                lastPlayerChunkZ = Int.MIN_VALUE
-                revalidateIndex = 0
+                clearCache()
             }
+
             wasActive = false
             return
         }
+
         wasActive = true
 
         val level = cachedLevel ?: return
-        if (chunkMap.isEmpty()) return
+
+        if (chunkMap.isEmpty()) {
+            return
+        }
+
         val targetY = cachedTargetY
-        if (targetY == Int.MIN_VALUE) return
+
+        if (targetY == Int.MIN_VALUE) {
+            return
+        }
+
 
         var budget = CHUNK_BUILD_BUDGET_PER_TICK
+
         while (budget > 0 && buildQueue.isNotEmpty()) {
             val key = buildQueue.removeFirst()
+
             val cache = chunkMap[key] ?: continue
-            if (cache.built) continue
+            cache.queued = false
+            if (cache.built) {
+                continue
+            }
+
             buildChunk(cache, level, targetY)
             budget--
         }
@@ -145,30 +186,67 @@ object HeightLimitRenderer {
         //?}
         targetY: Int
     ) {
-        val keys = chunkMap.keys
-        if (keys.isEmpty()) return
-        if (revalidateIndex >= keys.size) revalidateIndex = 0
-        val key = keys.elementAtOrNull(revalidateIndex) ?: return
-        revalidateIndex++
+        if (chunkMap.isEmpty()) {
+            return
+        }
+
+        if (revalidateDirty || revalidateKeys.size != chunkMap.size) {
+            revalidateKeys = LongArray(chunkMap.size)
+
+            var index = 0
+
+            for (key in chunkMap.keys) {
+                revalidateKeys[index++] = key
+            }
+
+            revalidateIndex = 0
+            revalidateDirty = false
+        }
+
+        if (revalidateKeys.isEmpty()) {
+            return
+        }
+
+        if (revalidateIndex >= revalidateKeys.size) {
+            revalidateIndex = 0
+        }
+
+        val key = revalidateKeys[revalidateIndex++]
         val cache = chunkMap[key] ?: return
-        if (!cache.built) return
+
+        if (!cache.built) {
+            return
+        }
+
         buildChunk(cache, level, targetY)
     }
 
     fun onBlockChangedHint(x: Int, y: Int, z: Int) {
-        if (chunkMap.isEmpty()) return
+        if (chunkMap.isEmpty()) {
+            return
+        }
+
         val targetY = cachedTargetY
-        if (targetY == Int.MIN_VALUE) return
-        if (y < targetY - 1 || y > targetY + 1) return
+        if (targetY == Int.MIN_VALUE) {
+            return
+        }
+
+        if (y < targetY - 1 || y > targetY + 1) {
+            return
+        }
 
         val cx = x shr CHUNK_SHIFT
         val cz = z shr CHUNK_SHIFT
+
         for (dx in -1..1) {
             for (dz in -1..1) {
                 val key = chunkKey(cx + dx, cz + dz)
                 val cache = chunkMap[key] ?: continue
-                if (cache.built) {
-                    cache.built = false
+
+                cache.built = false
+
+                if (!cache.queued) {
+                    cache.queued = true
                     buildQueue.addLast(key)
                 }
             }
@@ -187,8 +265,9 @@ object HeightLimitRenderer {
         val baseX = cache.cx shl CHUNK_SHIFT
         val baseZ = cache.cz shl CHUNK_SHIFT
 
-        val haloBlock = BooleanArray(18 * 18)
         val haloAir = BooleanArray(18 * 18)
+
+        val terracotta = BooleanArray(16 * 16)
 
         //? if fabric {
         val mutablePos = BlockPos.MutableBlockPos()
@@ -198,56 +277,289 @@ object HeightLimitRenderer {
             for (dz in -1..16) {
                 val wx = baseX + dx
                 val wz = baseZ + dz
-                val idx = (dx + 1) * 18 + (dz + 1)
+
+                val haloIndex = (dx + 1) * 18 + (dz + 1)
 
                 //? if 1.8.9 {
                 /*val pos = BlockPos(wx, targetY, wz)
                 val state = level.getBlockState(pos)
-                haloAir[idx] = level.isAirBlock(pos)
-                haloBlock[idx] = state.block == Blocks.stained_hardened_clay
+
+                haloAir[haloIndex] = level.isAirBlock(pos)
+
+                if (dx in 0..15 && dz in 0..15) {
+                    terracotta[dx * 16 + dz] = state.block == Blocks.stained_hardened_clay
+                }
                 *///?} else {
                 mutablePos.set(wx, targetY, wz)
+
                 val state = level.getBlockState(mutablePos)
-                haloAir[idx] = state.isAir
-                haloBlock[idx] = !state.isAir && state.`is`(BlockTags.TERRACOTTA)
+
+                haloAir[haloIndex] = state.isAir
+
+                if (dx in 0..15 && dz in 0..15) {
+                    terracotta[dx * 16 + dz] = !state.isAir && state.`is`(BlockTags.TERRACOTTA)
+                }
                 //?}
             }
         }
 
-        cache.clearBlockBits()
-        var count = 0
-        val tempFaces = IntArray(CHUNK_SIZE * CHUNK_SIZE * 6)
+        val blockBits = LongArray(4)
 
-        for (lx in 0 until CHUNK_SIZE) {
-            for (lz in 0 until CHUNK_SIZE) {
-                val idx = (lx + 1) * 18 + (lz + 1)
-                if (!haloBlock[idx]) continue
-                cache.setBlock(lx, lz)
+        for (lx in 0 until 16) {
+            for (lz in 0 until 16) {
+                if (!terracotta[lx * 16 + lz]) {
+                    continue
+                }
 
-                val wx = baseX + lx
-                val wz = baseZ + lz
+                val bit = lz * 16 + lx
 
-                if (haloAir[(lx + 1) * 18 + lz]) tempFaces[count++] = pack(lx, lz, FACE_NORTH)
-                if (haloAir[(lx + 1) * 18 + (lz + 2)]) tempFaces[count++] = pack(lx, lz, FACE_SOUTH)
-                if (haloAir[lx * 18 + (lz + 1)]) tempFaces[count++] = pack(lx, lz, FACE_WEST)
-                if (haloAir[(lx + 2) * 18 + (lz + 1)]) tempFaces[count++] = pack(lx, lz, FACE_EAST)
+                blockBits[bit ushr 6] = blockBits[bit ushr 6] or (1L shl (bit and 63))
+            }
+        }
+
+        if (blockBits[0] == 0L && blockBits[1] == 0L && blockBits[2] == 0L && blockBits[3] == 0L) {
+            cache.faces = EMPTY_FACES
+            cache.built = true
+            return
+        }
+
+        val topMask = BooleanArray(16 * 16)
+        val bottomMask = BooleanArray(16 * 16)
+        val northMask = BooleanArray(16 * 16)
+        val southMask = BooleanArray(16 * 16)
+        val westMask = BooleanArray(16 * 16)
+        val eastMask = BooleanArray(16 * 16)
+
+        fun isTerracotta(lx: Int, lz: Int): Boolean {
+            val bit = lz * 16 + lx
+
+            return (blockBits[bit ushr 6] and (1L shl (bit and 63))) != 0L
+        }
+
+        for (lx in 0 until 16) {
+            for (lz in 0 until 16) {
+                if (!isTerracotta(lx, lz)) {
+                    continue
+                }
+
+                val index = lx * 16 + lz
+
+                if (haloAir[(lx + 1) * 18 + lz]) {
+                    northMask[index] = true
+                }
+
+                if (haloAir[(lx + 1) * 18 + (lz + 2)]) {
+                    southMask[index] = true
+                }
+
+                if (haloAir[lx * 18 + (lz + 1)]) {
+                    westMask[index] = true
+                }
+
+                if (haloAir[(lx + 2) * 18 + (lz + 1)]) {
+                    eastMask[index] = true
+                }
 
                 //? if 1.8.9 {
-                /*val abovePos = BlockPos(wx, targetY + 1, wz)
-                val belowPos = BlockPos(wx, targetY - 1, wz)
-                if (level.isAirBlock(abovePos)) tempFaces[count++] = pack(lx, lz, FACE_TOP)
-                if (level.isAirBlock(belowPos)) tempFaces[count++] = pack(lx, lz, FACE_BOTTOM)
+                /*val abovePos = BlockPos(baseX + lx, targetY + 1, baseZ + lz)
+                val belowPos = BlockPos(baseX + lx, targetY - 1, baseZ + lz)
+
+                if (level.isAirBlock(abovePos)) {
+                    topMask[index] = true
+                }
+
+                if (level.isAirBlock(belowPos)) {
+                    bottomMask[index] = true
+                }
                 *///?} else {
-                mutablePos.set(wx, targetY + 1, wz)
-                if (level.getBlockState(mutablePos).isAir) tempFaces[count++] = pack(lx, lz, FACE_TOP)
-                mutablePos.set(wx, targetY - 1, wz)
-                if (level.getBlockState(mutablePos).isAir) tempFaces[count++] = pack(lx, lz, FACE_BOTTOM)
+                mutablePos.set(baseX + lx, targetY + 1, baseZ + lz)
+
+                if (level.getBlockState(mutablePos).isAir) {
+                    topMask[index] = true
+                }
+
+                mutablePos.set(baseX + lx, targetY - 1, baseZ + lz)
+
+                if (level.getBlockState(mutablePos).isAir) {
+                    bottomMask[index] = true
+                }
                 //?}
             }
         }
 
-        cache.faces = tempFaces.copyOf(count)
+        val result = IntArray(1536)
+        var resultCount = 0
+
+        resultCount = greedyMeshHorizontal(
+            topMask,
+            FACE_TOP,
+            result,
+            resultCount
+        )
+
+        resultCount = greedyMeshHorizontal(
+            bottomMask,
+            FACE_BOTTOM,
+            result,
+            resultCount
+        )
+
+        resultCount = greedyMeshNorthSouth(
+            northMask,
+            FACE_NORTH,
+            result,
+            resultCount
+        )
+
+        resultCount = greedyMeshNorthSouth(
+            southMask,
+            FACE_SOUTH,
+            result,
+            resultCount
+        )
+
+        resultCount = greedyMeshWestEast(
+            westMask,
+            FACE_WEST,
+            result,
+            resultCount
+        )
+
+        resultCount = greedyMeshWestEast(
+            eastMask,
+            FACE_EAST,
+            result,
+            resultCount
+        )
+
+        cache.faces =
+            if (resultCount == 0) {
+                EMPTY_FACES
+            } else {
+                result.copyOf(resultCount)
+            }
+
         cache.built = true
+    }
+
+    private fun greedyMeshHorizontal(mask: BooleanArray, face: Int, result: IntArray, initialCount: Int): Int {
+        var resultCount = initialCount
+
+        for (x in 0 until 16) {
+            for (z in 0 until 16) {
+                val index = x * 16 + z
+
+                if (!mask[index]) {
+                    continue
+                }
+
+                var width = 1
+                while (z + width < 16 && mask[x * 16 + z + width]) {
+                    width++
+                }
+
+                var height = 1
+
+                outer@ while (x + height < 16) {
+                    for (dz in 0 until width) {
+                        if (!mask[(x + height) * 16 + z + dz]) {
+                            break@outer
+                        }
+                    }
+
+                    height++
+                }
+
+                for (dx in 0 until height) {
+                    for (dz in 0 until width) {
+                        mask[(x + dx) * 16 + z + dz] = false
+                    }
+                }
+
+                result[resultCount++] =
+                    packFace(
+                        x = x,
+                        z = z,
+                        width = height,
+                        height = width,
+                        face = face
+                    )
+            }
+        }
+
+        return resultCount
+    }
+
+    private fun greedyMeshNorthSouth(mask: BooleanArray, face: Int, result: IntArray, initialCount: Int): Int {
+        var resultCount = initialCount
+
+        for (z in 0 until 16) {
+            var x = 0
+
+            while (x < 16) {
+                if (!mask[x * 16 + z]) {
+                    x++
+                    continue
+                }
+
+                val startX = x
+                while (x < 16 && mask[x * 16 + z]) {
+                    x++
+                }
+
+                val width = x - startX
+                for (mergedX in startX until x) {
+                    mask[mergedX * 16 + z] = false
+                }
+
+                result[resultCount++] =
+                    packFace(
+                        x = startX,
+                        z = z,
+                        width = width,
+                        height = 1,
+                        face = face
+                    )
+            }
+        }
+
+        return resultCount
+    }
+
+    private fun greedyMeshWestEast(mask: BooleanArray, face: Int, result: IntArray, initialCount: Int): Int {
+        var resultCount = initialCount
+
+        for (x in 0 until 16) {
+            var z = 0
+
+            while (z < 16) {
+                if (!mask[x * 16 + z]) {
+                    z++
+                    continue
+                }
+
+                val startZ = z
+                while (z < 16 && mask[x * 16 + z]) {
+                    z++
+                }
+
+                val width = z - startZ
+                for (mergedZ in startZ until z) {
+                    mask[x * 16 + mergedZ] = false
+                }
+
+                result[resultCount++] =
+                    packFace(
+                        x = x,
+                        z = startZ,
+                        width = width,
+                        height = 1,
+                        face = face
+                    )
+            }
+        }
+
+        return resultCount
     }
 
     private fun onWorldRender(
@@ -257,72 +569,89 @@ object HeightLimitRenderer {
         context: LevelRenderContext
         //?}
     ) {
-        if (!HyBridgeConfig.heightOverlay || !HypixelPackets.inTheBridge) return
+        if (!HyBridgeConfig.heightOverlay || !HypixelPackets.inTheBridge) {
+            return
+        }
 
         val mc =
-            //? if 1.8.9 {
-            //Minecraft.getMinecraft()
-        //?} else {
-        Minecraft.getInstance()
+        //? if 1.8.9 {
+        //Minecraft.getMinecraft()
+            //?} else {
+            Minecraft.getInstance()
         //?}
+
         val player =
-            //? if 1.8.9 {
-            //mc.thePlayer
+        //? if 1.8.9 {
+        //mc.thePlayer
             //?} else {
             mc.player
             //?}
                 ?: return
+
         val level =
-            //? if 1.8.9 {
-            //mc.theWorld
+        //? if 1.8.9 {
+        //mc.theWorld
             //?} else {
             mc.level
             //?}
                 ?: return
 
+        val map = HypixelPackets.currentMapName ?: return
         val targetY = 99
 
         //? if 1.8.9 {
-        //val partialTicks = event.partialTicks
-        //?} elif >= 26.2 {
+        /*val partialTicks = event.partialTicks
+        *///?} elif >= 26.2 {
         val camera = mc.gameRenderer.mainCamera()
         //?} else {
         //val camera = mc.gameRenderer.mainCamera
         //?}
 
         val viewerX =
-            //? if 1.8.9 {
-            //player.lastTickPosX + (player.posX - player.lastTickPosX) * partialTicks
-        //?} else {
-        camera.position().x
+        //? if 1.8.9 {
+        //player.lastTickPosX +
+        //    (player.posX - player.lastTickPosX) * partialTicks
+            //?} else {
+            camera.position().x
         //?}
+
         val viewerY =
-            //? if 1.8.9 {
-            //player.lastTickPosY + (player.posY - player.lastTickPosY) * partialTicks
-        //?} else {
-        camera.position().y
+        //? if 1.8.9 {
+        //player.lastTickPosY +
+        //    (player.posY - player.lastTickPosY) * partialTicks
+            //?} else {
+            camera.position().y
         //?}
+
         val viewerZ =
-            //? if 1.8.9 {
-            //player.lastTickPosZ + (player.posZ - player.lastTickPosZ) * partialTicks
-        //?} else {
-        camera.position().z
+        //? if 1.8.9 {
+        //player.lastTickPosZ +
+        //    (player.posZ - player.lastTickPosZ) * partialTicks
+            //?} else {
+            camera.position().z
         //?}
 
         val playerX =
-            //? if 1.8.9 {
-            //floor(player.posX).toInt()
-        //?} else {
-        floor(player.x).toInt()
-        //?}
-        val playerZ =
-            //? if 1.8.9 {
-            //floor(player.posZ).toInt()
-        //?} else {
-        floor(player.z).toInt()
+        //? if 1.8.9 {
+        //floor(player.posX).toInt()
+            //?} else {
+            floor(player.x).toInt()
         //?}
 
-        syncCacheRegion(HypixelPackets.currentMapName ?: return, targetY, level, playerX, playerZ)
+        val playerZ =
+        //? if 1.8.9 {
+        //floor(player.posZ).toInt()
+            //?} else {
+            floor(player.z).toInt()
+        //?}
+
+        syncCacheRegion(
+            map,
+            targetY,
+            level,
+            playerX,
+            playerZ
+        )
 
         //? if 1.8.9 {
         /*val tessellator = Tessellator.getInstance()
@@ -333,6 +662,7 @@ object HeightLimitRenderer {
         buffer.setTranslation(0.0, 0.0, 0.0)
 
         GlStateManager.enableBlend()
+
         GlStateManager.tryBlendFuncSeparate(
             GL11.GL_SRC_ALPHA,
             GL11.GL_ONE_MINUS_SRC_ALPHA,
@@ -346,7 +676,10 @@ object HeightLimitRenderer {
         GL11.glEnable(GL11.GL_POLYGON_OFFSET_FILL)
         GL11.glPolygonOffset(-1.0f, -1.0f)
 
-        buffer.begin(GL11.GL_QUADS, DefaultVertexFormats.POSITION_COLOR)
+        buffer.begin(
+            GL11.GL_QUADS,
+            DefaultVertexFormats.POSITION_COLOR
+        )
 
         renderCachedOverlay(
             buffer,
@@ -370,9 +703,12 @@ object HeightLimitRenderer {
         GlStateManager.popMatrix()
         *///?} else {
         val matrices = context.poseStack()
+
         matrices.pushPose()
+
         //? if >= 26.2 {
-        val collector = context.submitNodeCollector().order(1)
+        val collector =
+            context.submitNodeCollector().order(1)
 
         collector.submitCustomGeometry(
             matrices,
@@ -390,7 +726,10 @@ object HeightLimitRenderer {
         }
         //?} else {
         /*val consumers = context.bufferSource()
-        val buffer = consumers.getBuffer(RenderTypes.debugFilledBox())
+
+        val buffer =
+            consumers.getBuffer(RenderTypes.debugFilledBox())
+
         val pose = matrices.last().pose()
 
         renderCachedOverlay(
@@ -403,6 +742,7 @@ object HeightLimitRenderer {
             viewerZ
         )
         *///?}
+
         matrices.popPose()
         //?}
     }
@@ -425,19 +765,28 @@ object HeightLimitRenderer {
         if (levelChanged || mapChanged || yChanged) {
             chunkMap.clear()
             buildQueue.clear()
-            revalidateIndex = 0
+
             cachedLevel = level
             cachedMapName = map
             cachedTargetY = targetY
+
             lastPlayerChunkX = Int.MIN_VALUE
             lastPlayerChunkZ = Int.MIN_VALUE
+
+            revalidateKeys = LongArray(0)
+            revalidateIndex = 0
+            revalidateDirty = true
         }
 
-        val pcx = playerX shr CHUNK_SHIFT
-        val pcz = playerZ shr CHUNK_SHIFT
-        if (pcx == lastPlayerChunkX && pcz == lastPlayerChunkZ) return
-        lastPlayerChunkX = pcx
-        lastPlayerChunkZ = pcz
+        val playerChunkX = playerX shr CHUNK_SHIFT
+        val playerChunkZ = playerZ shr CHUNK_SHIFT
+
+        if (playerChunkX == lastPlayerChunkX && playerChunkZ == lastPlayerChunkZ) {
+            return
+        }
+
+        lastPlayerChunkX = playerChunkX
+        lastPlayerChunkZ = playerChunkZ
 
         val minCx = (playerX - RADIUS) shr CHUNK_SHIFT
         val maxCx = (playerX + RADIUS) shr CHUNK_SHIFT
@@ -447,24 +796,41 @@ object HeightLimitRenderer {
         for (cx in minCx..maxCx) {
             for (cz in minCz..maxCz) {
                 val key = chunkKey(cx, cz)
-                if (!chunkMap.containsKey(key)) {
-                    chunkMap[key] = ChunkCache(cx, cz)
-                    buildQueue.addLast(key)
+
+                if (chunkMap.containsKey(key)) {
+                    continue
                 }
+
+                chunkMap[key] = ChunkCache(cx, cz)
+                buildQueue.addLast(key)
+                chunkMap[key]?.queued = true
             }
         }
 
-        val evictMinCx = minCx - (CHUNK_EVICT_BUFFER shr CHUNK_SHIFT) - 1
-        val evictMaxCx = maxCx + (CHUNK_EVICT_BUFFER shr CHUNK_SHIFT) + 1
-        val evictMinCz = minCz - (CHUNK_EVICT_BUFFER shr CHUNK_SHIFT) - 1
-        val evictMaxCz = maxCz + (CHUNK_EVICT_BUFFER shr CHUNK_SHIFT) + 1
+        val bufferChunks = CHUNK_EVICT_BUFFER shr CHUNK_SHIFT
 
-        val it = chunkMap.entries.iterator()
-        while (it.hasNext()) {
-            val c = it.next().value
-            if (c.cx !in evictMinCx..evictMaxCx || c.cz < evictMinCz || c.cz > evictMaxCz) {
-                it.remove()
+        val evictMinCx = minCx - bufferChunks - 1
+        val evictMaxCx = maxCx + bufferChunks + 1
+        val evictMinCz = minCz - bufferChunks - 1
+        val evictMaxCz = maxCz + bufferChunks + 1
+
+        val iterator = chunkMap.entries.iterator()
+
+        var removedAny = false
+
+        while (iterator.hasNext()) {
+            val cache = iterator.next().value
+
+            if (cache.cx !in evictMinCx..evictMaxCx || cache.cz < evictMinCz || cache.cz > evictMaxCz) {
+                iterator.remove()
+                removedAny = true
             }
+        }
+
+        revalidateDirty = if (removedAny) {
+            true
+        } else {
+            true
         }
     }
 
@@ -485,79 +851,187 @@ object HeightLimitRenderer {
         viewerZ: Double
     ) {
         val targetY = cachedTargetY
-        if (targetY == Int.MIN_VALUE || chunkMap.isEmpty()) return
+
+        if (targetY == Int.MIN_VALUE || chunkMap.isEmpty()) {
+            return
+        }
 
         val alpha = HyBridgeConfig.heightOverlayOpacity.toFloat() / 100f
 
         val minX = playerX - RADIUS
         val maxX = playerX + RADIUS
+
         val minZ = playerZ - RADIUS
         val maxZ = playerZ + RADIUS
 
         for (cache in chunkMap.values) {
-            if (!cache.built || cache.faces.isEmpty()) continue
+            if (!cache.built || cache.faces.isEmpty()) {
+                continue
+            }
 
             val baseX = cache.cx shl CHUNK_SHIFT
             val baseZ = cache.cz shl CHUNK_SHIFT
 
-            if (baseX + (CHUNK_SIZE - 1) < minX || baseX > maxX ||
-                baseZ + (CHUNK_SIZE - 1) < minZ || baseZ > maxZ
-            ) continue
+            if (baseX + 15 < minX || baseX > maxX || baseZ + 15 < minZ || baseZ > maxZ) {
+                continue
+            }
 
-            val faces = cache.faces
-            for (i in faces.indices) {
-                val packed = faces[i]
-                val lx = unpackLX(packed)
-                val lz = unpackLZ(packed)
-                val wx = baseX + lx
-                val wz = baseZ + lz
+            for (packed in cache.faces) {
+                val face = unpackFace(packed)
 
-                if (wx !in minX..maxX || wz < minZ || wz > maxZ) continue
+                val localX = unpackX(packed)
+                val localZ = unpackZ(packed)
 
-                val x0 = (wx - viewerX).toFloat()
-                val x1 = (wx + 1.0 - viewerX).toFloat()
-                val y0 = (targetY - viewerY).toFloat()
-                val y1 = (targetY + 1.0 - viewerY).toFloat()
-                val z0 = (wz - viewerZ).toFloat()
-                val z1 = (wz + 1.0 - viewerZ).toFloat()
+                val extentA = unpackWidth(packed)
+                val extentB = unpackHeight(packed)
 
-                when (unpackFace(packed)) {
-                    FACE_TOP -> drawTop(
-                        //? if fabric {
-                        p,
-                        //?}
-                        buffer, x0, y1, z0, x1, z1, alpha
-                    )
-                    FACE_BOTTOM -> drawBottom(
-                        //? if fabric {
-                        p,
-                        //?}
-                        buffer, x0, y0, z0, x1, z1, alpha
-                    )
-                    FACE_NORTH -> drawNorth(
-                        //? if fabric {
-                        p,
-                        //?}
-                        buffer, x0, x1, y0, y1, z0, alpha
-                    )
-                    FACE_SOUTH -> drawSouth(
-                        //? if fabric {
-                        p,
-                        //?}
-                        buffer, x0, x1, y0, y1, z1, alpha
-                    )
-                    FACE_WEST -> drawWest(
-                        //? if fabric {
-                        p,
-                        //?}
-                        buffer, x0, y0, y1, z0, z1, alpha
-                    )
-                    FACE_EAST -> drawEast(
-                        //? if fabric {
-                        p,
-                        //?}
-                        buffer, x1, y0, y1, z0, z1, alpha
-                    )
+                val wx = baseX + localX
+                val wz = baseZ + localZ
+
+                if (face == FACE_TOP || face == FACE_BOTTOM) {
+                    val xEnd = wx + extentA
+                    val zEnd = wz + extentB
+
+                    if (xEnd <= minX || wx > maxX || zEnd <= minZ || wz > maxZ) {
+                        continue
+                    }
+
+                    val x0 = (wx - viewerX).toFloat()
+                    val x1 = (xEnd - viewerX).toFloat()
+                    val z0 = (wz - viewerZ).toFloat()
+                    val z1 = (zEnd - viewerZ).toFloat()
+
+                    val y = if (face == FACE_TOP) {
+                        (targetY + 1.0 - viewerY).toFloat()
+                    } else {
+                        (targetY - viewerY).toFloat()
+                    }
+
+                    if (face == FACE_TOP) {
+                        drawTop(
+                            //? if fabric {
+                            p,
+                            //?}
+                            buffer,
+                            x0,
+                            y,
+                            z0,
+                            x1,
+                            z1,
+                            alpha
+                        )
+                    } else {
+                        drawBottom(
+                            //? if fabric {
+                            p,
+                            //?}
+                            buffer,
+                            x0,
+                            y,
+                            z0,
+                            x1,
+                            z1,
+                            alpha
+                        )
+                    }
+
+                    continue
+                }
+
+                if (face == FACE_NORTH || face == FACE_SOUTH) {
+                    val xEnd = wx + extentA
+
+                    if (xEnd <= minX || wx > maxX || wz < minZ || wz > maxZ) {
+                        continue
+                    }
+
+                    val x0 = (wx - viewerX).toFloat()
+                    val x1 = (xEnd - viewerX).toFloat()
+                    val y0 = (targetY - viewerY).toFloat()
+                    val y1 = (targetY + 1.0 - viewerY).toFloat()
+
+                    val z = if (face == FACE_NORTH) {
+                            (wz - viewerZ).toFloat()
+                        } else {
+                            (wz + 1.0 - viewerZ).toFloat()
+                        }
+
+                    if (face == FACE_NORTH) {
+                        drawNorth(
+                            //? if fabric {
+                            p,
+                            //?}
+                            buffer,
+                            x0,
+                            x1,
+                            y0,
+                            y1,
+                            z,
+                            alpha
+                        )
+                    } else {
+                        drawSouth(
+                            //? if fabric {
+                            p,
+                            //?}
+                            buffer,
+                            x0,
+                            x1,
+                            y0,
+                            y1,
+                            z,
+                            alpha
+                        )
+                    }
+
+                    continue
+                }
+
+                if (face == FACE_WEST || face == FACE_EAST) {
+                    val zEnd = wz + extentA
+
+                    if (wx !in minX..maxX || zEnd <= minZ || wz > maxZ) {
+                        continue
+                    }
+
+                    val y0 = (targetY - viewerY).toFloat()
+                    val y1 = (targetY + 1.0 - viewerY).toFloat()
+                    val z0 = (wz - viewerZ).toFloat()
+                    val z1 = (zEnd - viewerZ).toFloat()
+
+                    val x = if (face == FACE_WEST) {
+                            (wx - viewerX).toFloat()
+                        } else {
+                            (wx + 1.0 - viewerX).toFloat()
+                        }
+
+                    if (face == FACE_WEST) {
+                        drawWest(
+                            //? if fabric {
+                            p,
+                            //?}
+                            buffer,
+                            x,
+                            y0,
+                            y1,
+                            z0,
+                            z1,
+                            alpha
+                        )
+                    } else {
+                        drawEast(
+                            //? if fabric {
+                            p,
+                            //?}
+                            buffer,
+                            x,
+                            y0,
+                            y1,
+                            z0,
+                            z1,
+                            alpha
+                        )
+                    }
                 }
             }
         }
@@ -581,25 +1055,44 @@ object HeightLimitRenderer {
             //? if fabric {
             p,
             //?}
-            buffer, x0, y, z0, alpha
+            buffer,
+            x0,
+            y,
+            z0,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x0, y, z1, alpha
+            buffer,
+            x0,
+            y,
+            z1,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x1, y, z1, alpha
+            buffer,
+            x1,
+            y,
+            z1,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x1, y, z0, alpha
+            buffer,
+            x1,
+            y,
+            z0,
+            alpha
         )
     }
 
@@ -621,25 +1114,44 @@ object HeightLimitRenderer {
             //? if fabric {
             p,
             //?}
-            buffer, x0, y, z0, alpha
+            buffer,
+            x0,
+            y,
+            z0,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x1, y, z0, alpha
+            buffer,
+            x1,
+            y,
+            z0,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x1, y, z1, alpha
+            buffer,
+            x1,
+            y,
+            z1,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x0, y, z1, alpha
+            buffer,
+            x0,
+            y,
+            z1,
+            alpha
         )
     }
 
@@ -661,25 +1173,44 @@ object HeightLimitRenderer {
             //? if fabric {
             p,
             //?}
-            buffer, x0, y0, z, alpha
+            buffer,
+            x0,
+            y0,
+            z,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x0, y1, z, alpha
+            buffer,
+            x0,
+            y1,
+            z,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x1, y1, z, alpha
+            buffer,
+            x1,
+            y1,
+            z,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x1, y0, z, alpha
+            buffer,
+            x1,
+            y0,
+            z,
+            alpha
         )
     }
 
@@ -701,25 +1232,44 @@ object HeightLimitRenderer {
             //? if fabric {
             p,
             //?}
-            buffer, x1, y0, z, alpha
+            buffer,
+            x1,
+            y0,
+            z,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x1, y1, z, alpha
+            buffer,
+            x1,
+            y1,
+            z,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x0, y1, z, alpha
+            buffer,
+            x0,
+            y1,
+            z,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x0, y0, z, alpha
+            buffer,
+            x0,
+            y0,
+            z,
+            alpha
         )
     }
 
@@ -741,25 +1291,44 @@ object HeightLimitRenderer {
             //? if fabric {
             p,
             //?}
-            buffer, x, y0, z1, alpha
+            buffer,
+            x,
+            y0,
+            z1,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x, y1, z1, alpha
+            buffer,
+            x,
+            y1,
+            z1,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x, y1, z0, alpha
+            buffer,
+            x,
+            y1,
+            z0,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x, y0, z0, alpha
+            buffer,
+            x,
+            y0,
+            z0,
+            alpha
         )
     }
 
@@ -781,25 +1350,44 @@ object HeightLimitRenderer {
             //? if fabric {
             p,
             //?}
-            buffer, x, y0, z0, alpha
+            buffer,
+            x,
+            y0,
+            z0,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x, y1, z0, alpha
+            buffer,
+            x,
+            y1,
+            z0,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x, y1, z1, alpha
+            buffer,
+            x,
+            y1,
+            z1,
+            alpha
         )
+
         vertex(
             //? if fabric {
             p,
             //?}
-            buffer, x, y0, z1, alpha
+            buffer,
+            x,
+            y0,
+            z1,
+            alpha
         )
     }
 
@@ -816,9 +1404,28 @@ object HeightLimitRenderer {
         alpha: Float
     ) {
         //? if 1.8.9 {
-        //buffer.pos(x.toDouble(), y.toDouble(), z.toDouble()).color(0f, 0f, 0f, alpha).endVertex()
+        //buffer
+        //    .pos(
+        //        x.toDouble(),
+        //        y.toDouble(),
+        //        z.toDouble()
+        //    )
+        //    .color(
+        //        0f,
+        //        0f,
+        //        0f,
+        //        alpha
+        //    )
+        //    .endVertex()
         //?} else {
-        buffer.addVertex(p, x, y, z).setColor(0f, 0f, 0f, alpha)
+        buffer
+            .addVertex(p, x, y, z)
+            .setColor(
+                0f,
+                0f,
+                0f,
+                alpha
+            )
         //?}
     }
 }
