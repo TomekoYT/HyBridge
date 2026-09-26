@@ -3,16 +3,12 @@ package tomeko.hybridge.config
 //? if forge {
 /*import cc.polyfrost.oneconfig.config.Config
 import cc.polyfrost.oneconfig.config.annotations.*
-import cc.polyfrost.oneconfig.config.core.OneColor as PolyColor
 import cc.polyfrost.oneconfig.config.data.InfoType
 import cc.polyfrost.oneconfig.config.data.Mod
 import cc.polyfrost.oneconfig.config.data.ModType
 *///?} else {
 import org.polyfrost.oneconfig.api.config.v1.Config
 import org.polyfrost.oneconfig.api.config.v1.annotations.*
-//?}
-//? if forge {
-//import tomeko.hybridge.hud.BedwarsResourceDisplay
 //?}
 import tomeko.hybridge.utils.Constants
 
@@ -31,23 +27,24 @@ object HyBridgeConfig : Config(
     Category.HYPIXEL
     //?}
 ) {
-    //? if !forge {
+    //? if forge {
+    //@Exclude
+    //?}
     val DEPENDENCIES: List<Pair<String, List<String>>> = listOf(
 
     )
-    //?}
 
     fun register() {
         //? if forge {
         //initialize()
         //?} else {
         preload()
+        //?}
         for ((condition, dependencies) in DEPENDENCIES) {
             for (dependency in dependencies) {
                 addDependency(dependency, condition)
             }
         }
-        //?}
     }
 
     //? if forge {
@@ -81,7 +78,11 @@ object HyBridgeConfig : Config(
             //?}
             "Opacity",
         description = "Set opacity of height overlay blocks darkening in Hypixel The Bridge",
-        min = 0f, max = 100f, step = 1f,
+        min = 0f, max = 100f,
+        //? if forge
+        //step = 1,
+        //? else
+        step = 1f,
         category = CATEGORY_GENERAL,
         subcategory = SUBCATEGORY_HEIGHT_OVERLAY
     )

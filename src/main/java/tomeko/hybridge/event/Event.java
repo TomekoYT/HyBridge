@@ -1,6 +1,6 @@
 package tomeko.hybridge.event;
 
-//? if ornithe {
+//? if 1.8.9 {
 /*import java.lang.reflect.Array;
 import java.util.function.Function;
 

@@ -9,7 +9,6 @@ import net.minecraft.client.renderer.WorldRenderer
 import net.minecraft.client.renderer.vertex.DefaultVertexFormats
 import net.minecraft.init.Blocks
 import net.minecraft.util.BlockPos
-import net.ornithemc.osl.lifecycle.api.client.MinecraftClientEvents
 import org.lwjgl.opengl.GL11
 *///?} else {
 import com.mojang.blaze3d.vertex.VertexConsumer
@@ -25,7 +24,8 @@ import org.joml.Matrix4f
 //?}
 import tomeko.hybridge.config.HyBridgeConfig
 //? if 1.8.9 {
-/*import tomeko.hybridge.event.LevelRenderEvents
+/*import tomeko.hybridge.event.ClientTickEvents
+import tomeko.hybridge.event.LevelRenderEvents
 import tomeko.hybridge.event.RenderWorldLastEvent
 *///?}
 import tomeko.hybridge.location.HypixelPackets
@@ -110,11 +110,7 @@ object HeightLimitRenderer {
         //LevelRenderEvents.AFTER_TRANSLUCENT_FEATURES.register(::onWorldRender)
         //?}
 
-        //? if fabric {
         ClientTickEvents.END_CLIENT_TICK.register { onClientTick() }
-        //?} else {
-        //MinecraftClientEvents.TICK_END.register { onClientTick() }
-        //?}
     }
 
     private fun clearCache() {
@@ -600,8 +596,8 @@ object HeightLimitRenderer {
         val targetY = 99
 
         //? if 1.8.9 {
-        /*val partialTicks = event.partialTicks
-        *///?} elif >= 26.2 {
+        //val partialTicks = event.partialTicks
+        //?} elif >= 26.2 {
         val camera = mc.gameRenderer.mainCamera()
         //?} else {
         //val camera = mc.gameRenderer.mainCamera
@@ -609,25 +605,25 @@ object HeightLimitRenderer {
 
         val viewerX =
         //? if 1.8.9 {
-        //player.lastTickPosX +
-        //    (player.posX - player.lastTickPosX) * partialTicks
-            //?} else {
+        /*player.lastTickPosX +
+            (player.posX - player.lastTickPosX) * partialTicks
+            *///?} else {
             camera.position().x
         //?}
 
         val viewerY =
         //? if 1.8.9 {
-        //player.lastTickPosY +
-        //    (player.posY - player.lastTickPosY) * partialTicks
-            //?} else {
+        /*player.lastTickPosY +
+            (player.posY - player.lastTickPosY) * partialTicks
+            *///?} else {
             camera.position().y
         //?}
 
         val viewerZ =
         //? if 1.8.9 {
-        //player.lastTickPosZ +
-        //    (player.posZ - player.lastTickPosZ) * partialTicks
-            //?} else {
+        /*player.lastTickPosZ +
+            (player.posZ - player.lastTickPosZ) * partialTicks
+            *///?} else {
             camera.position().z
         //?}
 
@@ -1404,20 +1400,20 @@ object HeightLimitRenderer {
         alpha: Float
     ) {
         //? if 1.8.9 {
-        //buffer
-        //    .pos(
-        //        x.toDouble(),
-        //        y.toDouble(),
-        //        z.toDouble()
-        //    )
-        //    .color(
-        //        0f,
-        //        0f,
-        //        0f,
-        //        alpha
-        //    )
-        //    .endVertex()
-        //?} else {
+        /*buffer
+            .pos(
+                x.toDouble(),
+                y.toDouble(),
+                z.toDouble()
+            )
+            .color(
+                0f,
+                0f,
+                0f,
+                alpha
+            )
+            .endVertex()
+        *///?} else {
         buffer
             .addVertex(p, x, y, z)
             .setColor(
