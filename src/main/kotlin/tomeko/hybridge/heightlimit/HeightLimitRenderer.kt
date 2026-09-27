@@ -263,7 +263,7 @@ object HeightLimitRenderer {
 
         val haloAir = BooleanArray(18 * 18)
 
-        val terracotta = BooleanArray(16 * 16)
+        val correctBlock = BooleanArray(16 * 16)
 
         //? if fabric {
         val mutablePos = BlockPos.MutableBlockPos()
@@ -283,7 +283,7 @@ object HeightLimitRenderer {
                 haloAir[haloIndex] = level.isAirBlock(pos)
 
                 if (dx in 0..15 && dz in 0..15) {
-                    terracotta[dx * 16 + dz] = state.block == Blocks.stained_hardened_clay
+                    correctBlock[dx * 16 + dz] = state.block == Blocks.stained_hardened_clay
                 }
                 *///?} else {
                 mutablePos.set(wx, targetY, wz)
@@ -293,7 +293,7 @@ object HeightLimitRenderer {
                 haloAir[haloIndex] = state.isAir
 
                 if (dx in 0..15 && dz in 0..15) {
-                    terracotta[dx * 16 + dz] = !state.isAir && state.`is`(BlockTags.TERRACOTTA)
+                    correctBlock[dx * 16 + dz] = !state.isAir && state.`is`(BlockTags.TERRACOTTA)
                 }
                 //?}
             }
@@ -303,7 +303,7 @@ object HeightLimitRenderer {
 
         for (lx in 0 until 16) {
             for (lz in 0 until 16) {
-                if (!terracotta[lx * 16 + lz]) {
+                if (!correctBlock[lx * 16 + lz]) {
                     continue
                 }
 
@@ -326,7 +326,7 @@ object HeightLimitRenderer {
         val westMask = BooleanArray(16 * 16)
         val eastMask = BooleanArray(16 * 16)
 
-        fun isTerracotta(lx: Int, lz: Int): Boolean {
+        fun isCorrect(lx: Int, lz: Int): Boolean {
             val bit = lz * 16 + lx
 
             return (blockBits[bit ushr 6] and (1L shl (bit and 63))) != 0L
@@ -334,7 +334,7 @@ object HeightLimitRenderer {
 
         for (lx in 0 until 16) {
             for (lz in 0 until 16) {
-                if (!isTerracotta(lx, lz)) {
+                if (!isCorrect(lx, lz)) {
                     continue
                 }
 
