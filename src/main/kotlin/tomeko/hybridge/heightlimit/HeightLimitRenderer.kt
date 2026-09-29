@@ -50,8 +50,11 @@ object HeightLimitRenderer {
     private class ChunkCache(val cx: Int, val cz: Int) {
         var built = false
         var queued = false
+        var dirty = false
         var faces: IntArray = EMPTY_FACES
     }
+
+    private val dirtyKeys = ArrayList<Long>()
 
     private val chunkMap = HashMap<Long, ChunkCache>()
     private val buildQueue = ArrayDeque<Long>()
@@ -130,7 +133,7 @@ object HeightLimitRenderer {
     }
 
     private fun onClientTick() {
-        if (!HyBridgeConfig.heightOverlay || !HypixelPackets.inTheBridge) {
+        if (!HyBridgeConfig.debugModeEnabled && (!HyBridgeConfig.heightOverlay || !HypixelPackets.inTheBridge)) {
             if (wasActive) {
                 clearCache()
             }
@@ -218,35 +221,52 @@ object HeightLimitRenderer {
     }
 
     fun onBlockChangedHint(x: Int, y: Int, z: Int) {
-        if (chunkMap.isEmpty()) {
-            return
-        }
+        if (chunkMap.isEmpty()) return
 
         val targetY = cachedTargetY
-        if (targetY == Int.MIN_VALUE) {
-            return
-        }
-
-        if (y < targetY - 1 || y > targetY + 1) {
-            return
-        }
+        if (targetY == Int.MIN_VALUE) return
+        if (y < targetY - 1 || y > targetY + 1) return
 
         val cx = x shr CHUNK_SHIFT
         val cz = z shr CHUNK_SHIFT
 
-        for (dx in -1..1) {
-            for (dz in -1..1) {
-                val key = chunkKey(cx + dx, cz + dz)
-                val cache = chunkMap[key] ?: continue
+        markDirty(cx, cz)
 
-                cache.built = false
-
-                if (!cache.queued) {
-                    cache.queued = true
-                    buildQueue.addLast(key)
-                }
-            }
+        if (y == targetY) {
+            val lx = x and 15
+            val lz = z and 15
+            if (lx == 0) markDirty(cx - 1, cz)
+            if (lx == 15) markDirty(cx + 1, cz)
+            if (lz == 0) markDirty(cx, cz - 1)
+            if (lz == 15) markDirty(cx, cz + 1)
         }
+    }
+
+    private fun markDirty(cx: Int, cz: Int) {
+        val key = chunkKey(cx, cz)
+        val cache = chunkMap[key] ?: return
+        if (!cache.built) return
+        if (!cache.dirty) {
+            cache.dirty = true
+            dirtyKeys.add(key)
+        }
+    }
+
+    private fun flushDirty(
+        level:
+        //? if 1.8.9
+        //WorldClient,
+        //? else
+        ClientLevel,
+        targetY: Int
+    ) {
+        if (dirtyKeys.isEmpty()) return
+        for (key in dirtyKeys) {
+            val cache = chunkMap[key] ?: continue
+            cache.dirty = false
+            buildChunk(cache, level, targetY)
+        }
+        dirtyKeys.clear()
     }
 
     private fun buildChunk(
@@ -565,7 +585,7 @@ object HeightLimitRenderer {
         context: LevelRenderContext
         //?}
     ) {
-        if (!HyBridgeConfig.heightOverlay || !HypixelPackets.inTheBridge) {
+        if (!HyBridgeConfig.debugModeEnabled && (!HyBridgeConfig.heightOverlay || !HypixelPackets.inTheBridge)) {
             return
         }
 
@@ -593,7 +613,7 @@ object HeightLimitRenderer {
                 ?: return
 
         val map = HypixelPackets.currentMapName ?: return
-        val targetY = 99
+        val targetY = if (HyBridgeConfig.debugModeEnabled) HyBridgeConfig.debugModeHeight else 99
 
         //? if 1.8.9 {
         //val partialTicks = event.partialTicks
@@ -605,25 +625,25 @@ object HeightLimitRenderer {
 
         val viewerX =
         //? if 1.8.9 {
-        /*player.lastTickPosX +
-            (player.posX - player.lastTickPosX) * partialTicks
-            *///?} else {
+                /*player.lastTickPosX +
+                    (player.posX - player.lastTickPosX) * partialTicks
+                    *///?} else {
             camera.position().x
         //?}
 
         val viewerY =
         //? if 1.8.9 {
-        /*player.lastTickPosY +
-            (player.posY - player.lastTickPosY) * partialTicks
-            *///?} else {
+                /*player.lastTickPosY +
+                    (player.posY - player.lastTickPosY) * partialTicks
+                    *///?} else {
             camera.position().y
         //?}
 
         val viewerZ =
         //? if 1.8.9 {
-        /*player.lastTickPosZ +
-            (player.posZ - player.lastTickPosZ) * partialTicks
-            *///?} else {
+                /*player.lastTickPosZ +
+                    (player.posZ - player.lastTickPosZ) * partialTicks
+                    *///?} else {
             camera.position().z
         //?}
 
@@ -648,6 +668,8 @@ object HeightLimitRenderer {
             playerX,
             playerZ
         )
+
+        flushDirty(level, targetY)
 
         //? if 1.8.9 {
         /*val tessellator = Tessellator.getInstance()
@@ -947,10 +969,10 @@ object HeightLimitRenderer {
                     val y1 = (targetY + 1.0 - viewerY).toFloat()
 
                     val z = if (face == FACE_NORTH) {
-                            (wz - viewerZ).toFloat()
-                        } else {
-                            (wz + 1.0 - viewerZ).toFloat()
-                        }
+                        (wz - viewerZ).toFloat()
+                    } else {
+                        (wz + 1.0 - viewerZ).toFloat()
+                    }
 
                     if (face == FACE_NORTH) {
                         drawNorth(
@@ -996,10 +1018,10 @@ object HeightLimitRenderer {
                     val z1 = (zEnd - viewerZ).toFloat()
 
                     val x = if (face == FACE_WEST) {
-                            (wx - viewerX).toFloat()
-                        } else {
-                            (wx + 1.0 - viewerX).toFloat()
-                        }
+                        (wx - viewerX).toFloat()
+                    } else {
+                        (wx + 1.0 - viewerX).toFloat()
+                    }
 
                     if (face == FACE_WEST) {
                         drawWest(
