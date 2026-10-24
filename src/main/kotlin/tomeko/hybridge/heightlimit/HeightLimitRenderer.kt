@@ -613,7 +613,7 @@ object HeightLimitRenderer {
                 ?: return
 
         val map = HypixelPackets.currentMapName ?: return
-        val targetY = if (HyBridgeConfig.debugModeEnabled) HyBridgeConfig.debugModeHeight else 99
+        val targetY = if (HyBridgeConfig.debugModeEnabled) HyBridgeConfig.debugModeHeight else if (HypixelPackets.currentMapName == "Scully") 101 else 99
 
         //? if 1.8.9 {
         //val partialTicks = event.partialTicks
